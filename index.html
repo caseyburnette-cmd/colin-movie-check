@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#111315">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://api.upcitemdb.com; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://unpkg.com https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self' https://api.upcitemdb.com https://unpkg.com https://cdn.jsdelivr.net; media-src 'self' blob:; worker-src 'self' blob: https://cdn.jsdelivr.net https://unpkg.com; object-src 'none'; base-uri 'self'; form-action 'self'">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Colin Movie Check</title>
@@ -39,26 +39,46 @@
     <div class="search-card">
       <label for="searchInput">Search your movies</label>
       <input id="searchInput" type="search" placeholder="Start typing a title…" autocomplete="off" enterkeyhint="search">
-      <button id="scanBtn" class="primary scan" type="button">▣ Scan barcode</button>
-      <div class="hint">Manual search works offline after the catalog has loaded.</div>
+      <div class="scan-actions">
+        <button id="scanBtn" class="primary" type="button">▣ Scan barcode</button>
+        <button id="coverBtn" class="secondary" type="button">▧ Scan cover</button>
+      </div>
+      <div class="hint">Search is local. Cover text is read on your phone; the photo is not uploaded to Colin.</div>
     </div>
+
+    <input id="barcodePhotoInput" class="hidden-file" type="file" accept="image/*" capture="environment">
+    <input id="coverInput" class="hidden-file" type="file" accept="image/*" capture="environment">
 
     <section id="cameraPanel" class="panel hidden" aria-live="polite">
       <div class="camera-head">
-        <strong>Point at the UPC barcode</strong>
+        <strong>Point at the UPC/EAN barcode</strong>
         <button id="closeCameraBtn" class="ghost" type="button">Close</button>
       </div>
-      <div class="camera-frame"><video id="cameraVideo" playsinline muted></video><div class="reticle"></div></div>
+      <div class="camera-frame">
+        <video id="cameraVideo" playsinline muted></video>
+        <div class="reticle"></div>
+      </div>
       <p id="cameraStatus" class="muted">Starting camera…</p>
+      <button id="barcodePhotoBtn" class="secondary compact" type="button">Camera struggling? Take a barcode photo</button>
+    </section>
+
+    <section id="coverPanel" class="panel hidden" aria-live="polite">
+      <div class="camera-head">
+        <strong>Reading cover</strong>
+        <button id="closeCoverBtn" class="ghost" type="button">Close</button>
+      </div>
+      <img id="coverPreview" class="cover-preview" alt="Movie cover being analyzed">
+      <div class="progress-track" aria-hidden="true"><div id="ocrProgress" class="progress-bar"></div></div>
+      <p id="ocrStatus" class="muted">Preparing image…</p>
     </section>
 
     <section id="result" class="result" aria-live="polite">
-      <div class="empty-state">Type a title or scan a disc case.</div>
+      <div class="empty-state">Type a title, scan a barcode, or photograph the cover.</div>
     </section>
 
     <footer>
       <span id="catalogStatus">Catalog not loaded</span>
-      <button id="forgetBtn" class="text-btn" type="button">Forget key</button>
+      <span class="footer-actions"><span class="version">v2.1</span><button id="forgetBtn" class="text-btn" type="button">Forget key</button></span>
     </footer>
   </section>
 </main>
