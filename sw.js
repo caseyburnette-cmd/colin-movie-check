@@ -1,5 +1,5 @@
 'use strict';
-const CACHE='colin-movie-check-shell-v2.1';
+const CACHE='colin-movie-check-shell-v2.2';
 const SHELL=['./','index.html','styles.css','app.js','manifest.webmanifest','icon-192.png','icon-512.png'];
 const EXTERNAL=new Set([
   'https://unpkg.com/@zxing/browser@0.2.1/umd/zxing-browser.min.js',

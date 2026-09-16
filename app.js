@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION='2.0.1';
+const APP_VERSION='2.2.0';
 const ZXING_URL='https://unpkg.com/@zxing/browser@0.2.1/umd/zxing-browser.min.js';
 const TESSERACT_URL='https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.min.js';
 const $=s=>document.querySelector(s);
@@ -8,7 +8,7 @@ const searchInput=$('#searchInput'),result=$('#result'),catalogStatus=$('#catalo
 const scanBtn=$('#scanBtn'),coverBtn=$('#coverBtn'),cameraPanel=$('#cameraPanel'),cameraVideo=$('#cameraVideo'),cameraStatus=$('#cameraStatus'),closeCameraBtn=$('#closeCameraBtn');
 const barcodePhotoBtn=$('#barcodePhotoBtn'),barcodePhotoInput=$('#barcodePhotoInput'),coverInput=$('#coverInput'),coverPanel=$('#coverPanel'),coverPreview=$('#coverPreview'),ocrStatus=$('#ocrStatus'),ocrProgress=$('#ocrProgress'),closeCoverBtn=$('#closeCoverBtn');
 let catalog=null,passphrase='',stream=null,scanTimer=null,detector=null,zxingControls=null,barcodeBusy=false,ocrWorkerPromise=null,coverObjectUrl=null;
-const CACHE_KEY='cmc.catalog.v1',PASS_KEY='cmc.pass.v1';
+const CACHE_KEY='cmc.catalog.wrapper.v2',OLD_CACHE_KEY='cmc.catalog.v1',PASS_KEY='cmc.pass.v1';
 
 function norm(s){return (s||'').normalize('NFKD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/&/g,' and ').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim()}
 function escapeHtml(s){return String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
@@ -32,13 +32,28 @@ async function decryptCatalog(wrapper,phrase){
 }
 
 async function fetchAndUnlock(phrase){
-  let networkErr=null;
+  let wrapper=null,networkErr=null;
   try{
-    const r=await fetch('catalog.enc?ts='+Date.now(),{cache:'no-store'});if(!r.ok)throw new Error('Catalog HTTP '+r.status);
-    const data=await decryptCatalog(await r.json(),phrase);localStorage.setItem(CACHE_KEY,JSON.stringify(data));return data;
+    const r=await fetch('catalog.enc?ts='+Date.now(),{cache:'no-store'});
+    if(!r.ok)throw new Error('Catalog HTTP '+r.status);
+    wrapper=await r.json();
   }catch(e){networkErr=e}
-  const cached=localStorage.getItem(CACHE_KEY);if(cached){try{return JSON.parse(cached)}catch(_){}}
-  throw networkErr||new Error('No cached catalog is available');
+
+  // If the network catalog was fetched, decrypt THAT catalog. A wrong/stale
+  // passphrase must never silently fall back to an old plaintext cache.
+  if(wrapper){
+    const data=await decryptCatalog(wrapper,phrase);
+    localStorage.setItem(CACHE_KEY,JSON.stringify(wrapper));
+    localStorage.removeItem(OLD_CACHE_KEY);
+    return data;
+  }
+
+  // Offline fallback remains encrypted at rest and still requires the passphrase.
+  const cached=localStorage.getItem(CACHE_KEY);
+  if(cached){
+    try{return await decryptCatalog(JSON.parse(cached),phrase)}catch(e){throw e}
+  }
+  throw networkErr||new Error('No cached encrypted catalog is available');
 }
 
 function showApp(){unlockPanel.classList.add('hidden');appPanel.classList.remove('hidden');updateStatus();searchInput.focus()}
@@ -60,21 +75,46 @@ searchInput.addEventListener('input',()=>runSearch(searchInput.value));
 function loadScript(src,globalName){return new Promise((resolve,reject)=>{if(globalName&&window[globalName]){resolve(window[globalName]);return}const existing=document.querySelector(`script[data-cmc-src="${src}"]`);if(existing){existing.addEventListener('load',()=>resolve(globalName?window[globalName]:true),{once:true});existing.addEventListener('error',()=>reject(new Error('Could not load '+src)),{once:true});return}const s=document.createElement('script');s.src=src;s.async=true;s.crossOrigin='anonymous';s.dataset.cmcSrc=src;s.onload=()=>resolve(globalName?window[globalName]:true);s.onerror=()=>reject(new Error('Could not load scanner component'));document.head.appendChild(s)})}
 
 function cleanProductTitle(s){return (s||'').replace(/\b(4k|uhd|ultra hd|blu[ -]?ray|dvd|digital|disc|widescreen|fullscreen|special edition|collector'?s edition|steelbook|combo pack|2[- ]disc|3[- ]disc|anniversary edition)\b/ig,' ').replace(/\([^)]*(blu|dvd|4k|uhd)[^)]*\)/ig,' ').replace(/[\[\]{}]/g,' ').replace(/\s+/g,' ').trim()}
+function candidateProductTitle(obj){
+  if(!obj||typeof obj!=='object')return '';
+  const keys=['title','name','description','product','item','data'];
+  for(const k of keys){const v=obj[k];if(typeof v==='string'&&v.trim().length>=2)return v.trim()}
+  return '';
+}
+async function fetchJsonWithTimeout(url,ms=6500){
+  const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),ms);
+  try{const r=await fetch(url,{headers:{Accept:'application/json'},signal:ctrl.signal,cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);return await r.json()}finally{clearTimeout(timer)}
+}
+async function lookupBarcode(code){
+  const attempts=[];
+  try{
+    const j=await fetchJsonWithTimeout(`https://api.upcitemdb.com/prod/trial/lookup?upc=${encodeURIComponent(code)}`);
+    const item=j&&j.items&&j.items[0],raw=candidateProductTitle(item);
+    if(raw)return {raw,title:cleanProductTitle(raw),source:'UPCitemdb'};
+    attempts.push('UPCitemdb: no item');
+  }catch(e){attempts.push('UPCitemdb: '+(e.name==='AbortError'?'timeout':e.message))}
+  try{
+    const j=await fetchJsonWithTimeout(`https://barcode.monster/api/${encodeURIComponent(code)}`);
+    const raw=candidateProductTitle(j);
+    if(raw)return {raw,title:cleanProductTitle(raw),source:'barcode.monster'};
+    attempts.push('barcode.monster: no item');
+  }catch(e){attempts.push('barcode.monster: '+(e.name==='AbortError'?'timeout':e.message))}
+  throw new Error(attempts.join(' • '));
+}
 async function resolveBarcode(code){
-  if(barcodeBusy===false)barcodeBusy=true;
+  barcodeBusy=true;
   cameraStatus.textContent=`Barcode ${code} read. Looking up title…`;
   try{
-    const r=await fetch(`https://api.upcitemdb.com/prod/trial/lookup?upc=${encodeURIComponent(code)}`,{headers:{Accept:'application/json'}});if(!r.ok)throw new Error('lookup HTTP '+r.status);
-    const j=await r.json(),item=j.items&&j.items[0];if(!item||!item.title)throw new Error('barcode not found');
-    const title=cleanProductTitle(item.title),matches=rankMatches(title);searchInput.value=title;
+    const found=await lookupBarcode(code),title=found.title||found.raw,matches=rankMatches(title);searchInput.value=title;
     closeCamera();
     const exact=matches.find(m=>(m.norm||norm(m.title))===norm(title));
-    if(exact)renderExact(exact,'✓ YOU ALREADY HAVE THIS ONE',`Barcode identified: ${item.title}`);
-    else if(matches.length)renderMatches(matches,'BARCODE — POSSIBLE MATCHES',`Barcode identified: ${item.title}`);
-    else result.innerHTML=`<div class="answer warn"><div class="kicker">BARCODE IDENTIFIED</div><div><strong>${escapeHtml(item.title)}</strong></div><div class="barcode-note">I did not find that title in your library. UPC ${escapeHtml(code)}</div><button id="scanCoverFromResult" class="secondary inline-action" type="button">Scan the cover too</button></div>`;
+    if(exact)renderExact(exact,'✓ YOU ALREADY HAVE THIS ONE',`${found.source}: ${found.raw}`);
+    else if(matches.length)renderMatches(matches,'BARCODE — POSSIBLE MATCHES',`${found.source}: ${found.raw}`);
+    else result.innerHTML=`<div class="answer warn"><div class="kicker">BARCODE IDENTIFIED</div><div><strong>${escapeHtml(found.raw)}</strong></div><div class="barcode-note">I did not find that title in your library. UPC ${escapeHtml(code)}</div><button id="scanCoverFromResult" class="secondary inline-action" type="button">Scan the cover too</button></div>`;
   }catch(e){
     closeCamera();
-    result.innerHTML=`<div class="answer warn"><div class="kicker">BARCODE READ</div><div>UPC <strong>${escapeHtml(code)}</strong></div><div class="barcode-note">The barcode scanner worked, but the public product database did not identify this disc. Cover scan does not need that database.</div><button id="scanCoverFromResult" class="secondary inline-action" type="button">Scan cover instead</button></div>`;
+    const q=encodeURIComponent(code+' movie DVD Blu-ray');
+    result.innerHTML=`<div class="answer warn"><div class="kicker">BARCODE READ</div><div>UPC <strong>${escapeHtml(code)}</strong></div><div class="barcode-note">The camera read the barcode, but neither public barcode catalog identified this release. You can still scan the cover, or use the web fallback.</div><button id="scanCoverFromResult" class="secondary inline-action" type="button">Scan cover instead</button><a class="online-link" href="https://www.google.com/search?q=${q}" target="_blank" rel="noopener">Search this UPC on the web</a></div>`;
   }finally{barcodeBusy=false}
 }
 
@@ -139,42 +179,95 @@ async function decodeBarcodePhoto(file){
   }catch(_){result.innerHTML='<div class="answer bad"><div class="kicker">BARCODE NOT FOUND</div><div>I could not read a UPC/EAN from that photo. Try filling the frame with the barcode, or scan the front cover instead.</div><button id="scanCoverFromResult" class="secondary inline-action" type="button">Scan cover</button></div>'}
 }
 
-function levenshteinRatio(a,b){a=norm(a);b=norm(b);if(!a||!b)return 0;if(a===b)return 1;if(a.length>90)a=a.slice(0,90);if(b.length>90)b=b.slice(0,90);const prev=Array.from({length:b.length+1},(_,i)=>i),cur=new Array(b.length+1);for(let i=1;i<=a.length;i++){cur[0]=i;for(let j=1;j<=b.length;j++)cur[j]=Math.min(cur[j-1]+1,prev[j]+1,prev[j-1]+(a[i-1]===b[j-1]?0:1));for(let j=0;j<=b.length;j++)prev[j]=cur[j]}return 1-prev[b.length]/Math.max(a.length,b.length)}
-function ocrLines(text){return String(text||'').split(/\r?\n/).map(s=>s.trim()).filter(s=>s.length>=2&&s.length<=90).filter(s=>!/^(blu.?ray|dvd|4k|ultra hd|digital|widescreen|fullscreen|rated|disc|disk|special features?)$/i.test(s)).slice(0,50)}
+function levenshteinRatio(a,b){a=norm(a);b=norm(b);if(!a||!b)return 0;if(a===b)return 1;if(a.length>100)a=a.slice(0,100);if(b.length>100)b=b.slice(0,100);const prev=Array.from({length:b.length+1},(_,i)=>i),cur=new Array(b.length+1);for(let i=1;i<=a.length;i++){cur[0]=i;for(let j=1;j<=b.length;j++)cur[j]=Math.min(cur[j-1]+1,prev[j]+1,prev[j-1]+(a[i-1]===b[j-1]?0:1));for(let j=0;j<=b.length;j++)prev[j]=cur[j]}return 1-prev[b.length]/Math.max(a.length,b.length)}
+function ocrLines(text){return String(text||'').split(/\r?\n/).map(s=>s.trim()).filter(s=>s.length>=2&&s.length<=90).filter(s=>!/^(blu.?ray|dvd|4k|ultra hd|digital|widescreen|fullscreen|rated|disc|disk|special features?)$/i.test(s)).slice(0,80)}
+function lineCandidates(text){
+  const lines=ocrLines(text).map(norm).filter(Boolean),out=[...lines];
+  for(let i=0;i<lines.length;i++){
+    if(i+1<lines.length)out.push(lines[i]+' '+lines[i+1]);
+    if(i+2<lines.length)out.push(lines[i]+' '+lines[i+1]+' '+lines[i+2]);
+  }
+  return [...new Set(out)];
+}
+function compact(s){return norm(s).replace(/\s+/g,'')}
 function rankOcrMatches(text){
-  if(!catalog)return[];const all=norm(text),allTokens=new Set(titleTokens(all)),lines=ocrLines(text).map(norm).filter(Boolean),yearMatches=new Set((text.match(/\b(?:19|20)\d{2}\b/g)||[]).map(Number));
-  return catalog.movies.map(m=>{const nt=m.norm||norm(m.title),tokens=meaningfulTokens(nt),rawTokens=titleTokens(nt);let score=0,reason='';
-    if(nt.length>=3&&all.includes(nt)){score=100;reason='title text found on cover'}
+  if(!catalog)return[];
+  const all=norm(text),allCompact=compact(text),allTokens=new Set(titleTokens(all)),lines=lineCandidates(text),yearMatches=new Set((text.match(/\b(?:19|20)\d{2}\b/g)||[]).map(Number));
+  return catalog.movies.map(m=>{
+    const nt=m.norm||norm(m.title),ct=compact(nt),tokens=meaningfulTokens(nt),rawTokens=titleTokens(nt);let score=0,reason='';
+    if(nt.length>=3&&all.includes(nt)){score=100;reason='exact title text found'}
+    else if(ct.length>=4&&allCompact.includes(ct)){score=99;reason='title text found without spacing'}
     else{
       const coverage=tokens.length?tokens.filter(t=>allTokens.has(t)).length/tokens.length:0;
       const rawCoverage=rawTokens.length?rawTokens.filter(t=>allTokens.has(t)).length/rawTokens.length:0;
-      let bestLine=0;for(const line of lines){bestLine=Math.max(bestLine,levenshteinRatio(line,nt));if(line.includes(nt)||nt.includes(line)&&line.length>=5)bestLine=Math.max(bestLine,.9)}
-      score=Math.round(Math.max(coverage*.82,rawCoverage*.76,bestLine*.86)*100);reason='fuzzy cover text';
-      if(tokens.length===1&&tokens[0].length<=4&&coverage===1)score=Math.min(score,82);
+      let bestLine=0;
+      for(const line of lines){
+        bestLine=Math.max(bestLine,levenshteinRatio(line,nt),levenshteinRatio(compact(line),ct));
+        if((line.includes(nt)||nt.includes(line))&&line.length>=5)bestLine=Math.max(bestLine,.92);
+      }
+      score=Math.round(Math.max(coverage*.84,rawCoverage*.78,bestLine*.91)*100);reason='fuzzy cover text';
+      if(tokens.length===1&&tokens[0].length<=4&&coverage===1)score=Math.min(score,84);
     }
     if(m.year&&yearMatches.has(Number(m.year)))score=Math.min(100,score+5);
-    return {...m,score,reason}
-  }).filter(m=>m.score>=48).sort((a,b)=>b.score-a.score||a.title.localeCompare(b.title)).slice(0,8)
+    return {...m,score,reason};
+  }).filter(m=>m.score>=45).sort((a,b)=>b.score-a.score||a.title.localeCompare(b.title)).slice(0,8)
 }
 
-async function prepareOcrImage(file){
-  const {img,url}=await imageFromFile(file);try{const max=1800,scale=Math.min(1,max/Math.max(img.naturalWidth,img.naturalHeight)),w=Math.max(1,Math.round(img.naturalWidth*scale)),h=Math.max(1,Math.round(img.naturalHeight*scale)),canvas=document.createElement('canvas');canvas.width=w;canvas.height=h;const ctx=canvas.getContext('2d',{alpha:false});ctx.fillStyle='#fff';ctx.fillRect(0,0,w,h);ctx.drawImage(img,0,0,w,h);return canvas}finally{URL.revokeObjectURL(url)}}
+async function baseCanvasFromFile(file){
+  const {img,url}=await imageFromFile(file);
+  try{
+    const max=1800,scale=Math.min(1,max/Math.max(img.naturalWidth,img.naturalHeight)),w=Math.max(1,Math.round(img.naturalWidth*scale)),h=Math.max(1,Math.round(img.naturalHeight*scale)),canvas=document.createElement('canvas');
+    canvas.width=w;canvas.height=h;const ctx=canvas.getContext('2d',{alpha:false});ctx.fillStyle='#fff';ctx.fillRect(0,0,w,h);ctx.drawImage(img,0,0,w,h);return canvas;
+  }finally{URL.revokeObjectURL(url)}
+}
+function cloneCanvas(src,x=0,y=0,w=src.width,h=src.height){const c=document.createElement('canvas');c.width=Math.max(1,Math.round(w));c.height=Math.max(1,Math.round(h));c.getContext('2d',{alpha:false}).drawImage(src,x,y,w,h,0,0,c.width,c.height);return c}
+function contrastCanvas(src){
+  const c=cloneCanvas(src),ctx=c.getContext('2d',{alpha:false}),im=ctx.getImageData(0,0,c.width,c.height),d=im.data;
+  let lo=255,hi=0;
+  for(let i=0;i<d.length;i+=4){const g=Math.round(.2126*d[i]+.7152*d[i+1]+.0722*d[i+2]);if(g<lo)lo=g;if(g>hi)hi=g;d[i]=d[i+1]=d[i+2]=g}
+  const span=Math.max(24,hi-lo);
+  for(let i=0;i<d.length;i+=4){let g=(d[i]-lo)*255/span;g=(g-128)*1.35+128;g=clamp(Math.round(g),0,255);d[i]=d[i+1]=d[i+2]=g}
+  ctx.putImageData(im,0,0);return c
+}
+function ocrVariants(base){
+  const inner=cloneCanvas(base,Math.round(base.width*.04),Math.round(base.height*.05),Math.round(base.width*.92),Math.round(base.height*.90));
+  return [
+    {label:'full cover / sparse text',canvas:base},
+    {label:'high contrast',canvas:contrastCanvas(base)},
+    {label:'inside cover crop',canvas:contrastCanvas(inner)}
+  ];
+}
+function isConfidentOcr(matches){const top=matches[0],second=matches[1];return !!(top&&top.score>=92&&(top.score-(second?.score||0)>=5||top.score>=99))}
 function setOcrProgress(p,status){ocrProgress.style.width=`${Math.round(clamp(p,0,1)*100)}%`;if(status)ocrStatus.textContent=status}
 async function getOcrWorker(){
   if(ocrWorkerPromise)return ocrWorkerPromise;
-  ocrWorkerPromise=(async()=>{await loadScript(TESSERACT_URL,'Tesseract');if(!window.Tesseract)throw new Error('OCR engine did not load');const oem=Tesseract.OEM&&Tesseract.OEM.LSTM_ONLY!==undefined?Tesseract.OEM.LSTM_ONLY:1;return Tesseract.createWorker('eng',oem,{logger:m=>{if(m&&typeof m.progress==='number'){const label=(m.status||'Reading cover').replace(/_/g,' ');setOcrProgress(m.progress,label.charAt(0).toUpperCase()+label.slice(1)+'…')}}})})();
+  ocrWorkerPromise=(async()=>{
+    await loadScript(TESSERACT_URL,'Tesseract');if(!window.Tesseract)throw new Error('OCR engine did not load');
+    const oem=Tesseract.OEM&&Tesseract.OEM.LSTM_ONLY!==undefined?Tesseract.OEM.LSTM_ONLY:1;
+    const worker=await Tesseract.createWorker('eng',oem,{logger:m=>{if(m&&typeof m.progress==='number'){setOcrProgress(clamp(.12+m.progress*.78,0,0.92),(m.status||'Reading cover').replace(/_/g,' ')+'…')}}});
+    const psm=(Tesseract.PSM&&Tesseract.PSM.SPARSE_TEXT!==undefined)?Tesseract.PSM.SPARSE_TEXT:11;
+    await worker.setParameters({tessedit_pageseg_mode:psm,preserve_interword_spaces:'1',user_defined_dpi:'300'});
+    return worker;
+  })();
   try{return await ocrWorkerPromise}catch(e){ocrWorkerPromise=null;throw e}
 }
 async function scanCoverFile(file){
   closeCamera();coverPanel.classList.remove('hidden');if(coverObjectUrl)URL.revokeObjectURL(coverObjectUrl);coverObjectUrl=URL.createObjectURL(file);coverPreview.src=coverObjectUrl;setOcrProgress(.03,'Preparing cover image…');
   try{
-    const canvas=await prepareOcrImage(file);setOcrProgress(.08,'Loading on-phone text reader…');const worker=await getOcrWorker();const out=await worker.recognize(canvas),text=(out&&out.data&&out.data.text)||'';setOcrProgress(1,'Cover read complete.');
-    const matches=rankOcrMatches(text),top=matches[0],second=matches[1];
-    closeCover(false);
-    const raw=ocrLines(text).slice(0,8).join('\n');
-    if(top&&top.score>=92&&(top.score-(second?.score||0)>=5||top.score===100))renderExact(top,'✓ COVER MATCH — YOU HAVE THIS',`Matched from cover text (${top.score}% confidence)`);
-    else if(matches.length)renderMatches(matches,'COVER — POSSIBLE MATCHES',`Best text match ${top.score}%`);
-    else result.innerHTML=`<div class="answer bad"><div class="kicker">NO LIBRARY MATCH FROM COVER</div><div>I read the cover but did not find a confident match in your  library.</div>${raw?`<div class="ocr-raw">${escapeHtml(raw)}</div>`:''}<div class="ocr-note">Tip: keep the title large and square in the photo. Manual search remains available above.</div></div>`;
+    const base=await baseCanvasFromFile(file),variants=ocrVariants(base);setOcrProgress(.08,'Loading on-phone text reader…');const worker=await getOcrWorker();
+    let combined='',best=[];
+    for(let i=0;i<variants.length;i++){
+      setOcrProgress(.12+i*.26,`Reading cover (${i+1}/${variants.length}: ${variants[i].label})…`);
+      const out=await worker.recognize(variants[i].canvas),text=(out&&out.data&&out.data.text)||'';
+      combined+=(combined?'\n':'')+text;
+      best=rankOcrMatches(combined);
+      if(isConfidentOcr(best))break;
+    }
+    setOcrProgress(1,'Cover read complete.');
+    const top=best[0],second=best[1];closeCover(false);const raw=ocrLines(combined).slice(0,12).join('\n');
+    if(top&&isConfidentOcr(best))renderExact(top,'✓ COVER MATCH — YOU HAVE THIS',`Matched from multi-pass cover text (${top.score}% confidence)`);
+    else if(best.length)renderMatches(best,'COVER — POSSIBLE MATCHES',`Best multi-pass text match ${top.score}%`);
+    else result.innerHTML=`<div class="answer bad"><div class="kicker">NO LIBRARY MATCH FROM COVER</div><div>I could not read enough of the title to make a confident match.</div>${raw?`<div class="ocr-raw">${escapeHtml(raw)}</div>`:''}<div class="ocr-note">The app tried sparse-text OCR plus high-contrast passes. If the artwork is highly stylized, barcode or manual title search may still win.</div></div>`;
   }catch(e){closeCover(false);result.innerHTML=`<div class="answer warn"><div class="kicker">COVER SCAN COULD NOT FINISH</div><div>${escapeHtml(e.message||'OCR unavailable')}</div><div class="ocr-note">The first cover scan needs internet once to load the OCR engine. After that, the browser normally caches its components.</div></div>`}
 }
 function closeCover(clear=true){coverPanel.classList.add('hidden');if(clear&&coverObjectUrl){URL.revokeObjectURL(coverObjectUrl);coverObjectUrl=null;coverPreview.removeAttribute('src')}setOcrProgress(0,'Preparing image…')}
