@@ -1,6 +1,6 @@
 'use strict';
-const CACHE='colin-movie-check-shell-v2.4.1';
-const SHELL=['./','index.html','styles.css?v=241','app.js?v=241','manifest.webmanifest','icon-192.png','icon-512.png'];
+const CACHE='colin-movie-check-shell-v2.5';
+const SHELL=['./','index.html','styles.css?v=25','app.js?v=25','manifest.webmanifest','icon-192.png','icon-512.png'];
 const ZXING='https://unpkg.com/@zxing/browser@0.2.1/umd/zxing-browser.min.js';
 self.addEventListener('install',e=>e.waitUntil((async()=>{const c=await caches.open(CACHE);await c.addAll(SHELL);await Promise.allSettled([c.add(ZXING)]);await self.skipWaiting()})()));
 self.addEventListener('activate',e=>e.waitUntil((async()=>{for(const k of await caches.keys())if(k!==CACHE&&k.startsWith('colin-movie-check-shell-'))await caches.delete(k);await self.clients.claim()})()));
