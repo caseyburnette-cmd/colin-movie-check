@@ -1,5 +1,6 @@
 'use strict';
-const APP_VERSION='2.5';
+const APP_VERSION='2.6';
+const UPC_PROXY_BASE='https://colin-movie-upc.casey-burnette.workers.dev';
 const ZXING_URL='https://unpkg.com/@zxing/browser@0.2.1/umd/zxing-browser.min.js';
 const $=s=>document.querySelector(s);
 const unlockPanel=$('#unlockPanel'),appPanel=$('#appPanel'),unlockForm=$('#unlockForm'),passInput=$('#passphrase'),rememberPass=$('#rememberPass'),unlockError=$('#unlockError');
@@ -7,7 +8,7 @@ const titleInput=$('#titleInput'),yearInput=$('#yearInput'),result=$('#result'),
 const scanBtn=$('#scanBtn'),cameraPanel=$('#cameraPanel'),cameraVideo=$('#cameraVideo'),cameraStatus=$('#cameraStatus'),closeCameraBtn=$('#closeCameraBtn');
 const barcodePhotoBtn=$('#barcodePhotoBtn'),barcodePhotoInput=$('#barcodePhotoInput');
 let catalog=null,passphrase='',stream=null,scanTimer=null,detector=null,zxingControls=null,barcodeBusy=false;
-const CACHE_KEY='cmc.catalog.wrapper.v25',PASS_KEY='cmc.pass.v1';
+const CACHE_KEY='cmc.catalog.wrapper.v26',PASS_KEY='cmc.pass.v1';
 
 function norm(s){return (s||'').normalize('NFKD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/&/g,' and ').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim()}
 function escapeHtml(s){return String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
@@ -81,68 +82,57 @@ titleInput.addEventListener('input',runSearch);yearInput.addEventListener('input
 
 function loadScript(src,globalName){return new Promise((resolve,reject)=>{if(globalName&&window[globalName]){resolve(window[globalName]);return}const existing=document.querySelector(`script[data-cmc-src="${src}"]`);if(existing){existing.addEventListener('load',()=>resolve(globalName?window[globalName]:true),{once:true});existing.addEventListener('error',()=>reject(new Error('Could not load '+src)),{once:true});return}const s=document.createElement('script');s.src=src;s.async=true;s.crossOrigin='anonymous';s.dataset.cmcSrc=src;s.onload=()=>resolve(globalName?window[globalName]:true);s.onerror=()=>reject(new Error('Could not load scanner component'));document.head.appendChild(s)})}
 
-function cleanProductTitle(s){return (s||'').replace(/\b(4k|uhd|ultra hd|blu[ -]?ray|dvd|digital|disc|widescreen|fullscreen|special edition|collector'?s edition|steelbook|combo pack|2[- ]disc|3[- ]disc|anniversary edition|video disc)\b/ig,' ').replace(/\([^)]*(blu|dvd|4k|uhd)[^)]*\)/ig,' ').replace(/[\[\]{}]/g,' ').replace(/\s+/g,' ').trim()}
-function deepTitle(obj,depth=0){
-  if(!obj||depth>3)return '';
-  if(typeof obj==='string')return obj.trim().length>=2?obj.trim():'';
-  if(Array.isArray(obj)){for(const v of obj){const x=deepTitle(v,depth+1);if(x)return x}return ''}
-  const preferred=['title','name','product_name','itemName','description'];
-  for(const k of preferred){if(Object.prototype.hasOwnProperty.call(obj,k)){const x=deepTitle(obj[k],depth+1);if(x)return x}}
-  for(const k of ['product','data','item','result','items']){if(Object.prototype.hasOwnProperty.call(obj,k)){const x=deepTitle(obj[k],depth+1);if(x)return x}}
-  return '';
+function productYear(s){const m=String(s||'').match(/\b((?:18|19|20)\d{2})\b/);return m?Number(m[1]):null}
+function cleanProductTitle(s){
+  let x=String(s||'');
+  x=x.replace(/\([^)]*(?:dvd|blu[ -]?ray|4k|uhd|ultra hd|disc|edition|steelbook|widescreen|fullscreen|digital|combo|standard)[^)]*\)/ig,' ');
+  x=x.replace(/\[[^\]]*(?:dvd|blu[ -]?ray|4k|uhd|disc|edition|steelbook|widescreen|fullscreen|digital|combo|standard)[^\]]*\]/ig,' ');
+  x=x.replace(/\b(4k|uhd|ultra hd|blu[ -]?ray|dvd|digital|video disc|disc|widescreen|fullscreen|special edition|collector'?s edition|steelbook|combo pack|2[- ]disc|3[- ]disc|anniversary edition|standard edition|standard)\b/ig,' ');
+  x=x.replace(/\b(?:18|19|20)\d{2}\b/g,' ');
+  x=x.replace(/[\[\]{}()]/g,' ');
+  x=x.replace(/\s+/g,' ').trim();
+  return x;
 }
 function barcodeVariants(code){const d=String(code||'').replace(/\D/g,'');const out=[d];if(d.length===12)out.push('0'+d);if(d.length===13&&d.startsWith('0'))out.push(d.slice(1));if(d.length===14&&d.startsWith('00'))out.push(d.slice(2));return [...new Set(out.filter(Boolean))]}
-async function fetchJsonWithTimeout(url,ms=7000){const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),ms);try{const r=await fetch(url,{headers:{Accept:'application/json'},signal:ctrl.signal,cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);return await r.json()}finally{clearTimeout(timer)}}
+async function fetchJsonWithTimeout(url,ms=7000){const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),ms);try{const r=await fetch(url,{headers:{Accept:'application/json'},signal:ctrl.signal,cache:'no-store'});let j=null;try{j=await r.json()}catch(_){}if(!r.ok){const err=new Error((j&&j.error)||('HTTP '+r.status));err.status=r.status;err.payload=j;throw err}return j}finally{clearTimeout(timer)}}
 function validYear(v){const y=Number(v);return Number.isInteger(y)&&y>=1880&&y<=2100?y:null}
-async function lookupUpcmdb(code){
-  const j=await fetchJsonWithTimeout(`https://upcmdb.com/api/v1/lookup/${encodeURIComponent(code)}`,5500);
-  const d=j&&j.data&&typeof j.data==='object'?j.data:null;
-  if(!d||String(j.status||'').toLowerCase()!=='success'||!d.title)throw new Error('no movie title');
-  const raw=String(d.title).trim();
-  const title=cleanProductTitle(raw);
+async function lookupProxy(code){
+  if(!UPC_PROXY_BASE||UPC_PROXY_BASE.includes('__UPC_PROXY'))throw new Error('UPC lookup relay is not configured');
+  const j=await fetchJsonWithTimeout(`${UPC_PROXY_BASE}/lookup/${encodeURIComponent(code)}`,7000);
+  if(!j||j.ok!==true)throw new Error((j&&j.error)||'lookup relay error');
+  if(!j.found||!j.title){const e=new Error('not_found');e.code='NOT_FOUND';throw e}
+  const raw=String(j.title).trim(),title=cleanProductTitle(raw),year=productYear(raw);
   if(title.length<2)throw new Error('no usable movie title');
-  return {raw,title,year:validYear(d.year),format:String(d.format||'').trim(),source:'UPCMDB',lookupCode:code};
-}
-async function lookupGenericBarcode(code){
-  const services=[
-    ['BarcodeFinder',`https://api.barcodefinder.info/barcode/${encodeURIComponent(code)}`],
-    ['UPCitemdb',`https://api.upcitemdb.com/prod/trial/lookup?upc=${encodeURIComponent(code)}`]
-  ];
-  const attempts=[];
-  for(const [source,url] of services){
-    try{
-      const j=await fetchJsonWithTimeout(url,5000),raw=deepTitle(j);
-      if(raw){const title=cleanProductTitle(raw);if(title.length>=2)return {raw,title,year:null,format:'',source,lookupCode:code}}
-      attempts.push(`${source}: no title`);
-    }catch(e){attempts.push(`${source}: ${e.name==='AbortError'?'timeout':e.message}`)}
-  }
-  throw new Error(attempts.join(' • '));
+  return {raw,title,year,format:'',source:String(j.source||'UPCitemdb'),lookupCode:code};
 }
 async function lookupBarcode(code){
   const attempts=[];
   for(const c of barcodeVariants(code)){
-    try{return await lookupUpcmdb(c)}catch(e){attempts.push(`UPCMDB ${c}: ${e.name==='AbortError'?'timeout':e.message}`)}
+    try{return await lookupProxy(c)}catch(e){attempts.push({code:c,error:e});if(e&&e.status===429)break}
   }
-  for(const c of barcodeVariants(code)){
-    try{return await lookupGenericBarcode(c)}catch(e){attempts.push(`generic ${c}: ${e.message}`)}
-  }
-  throw new Error(attempts.join(' • '));
+  const rateLimited=attempts.some(a=>a.error&&a.error.status===429);
+  const allNotFound=attempts.length&&attempts.every(a=>a.error&&a.error.code==='NOT_FOUND');
+  const e=new Error(rateLimited?'UPC lookup daily/rate limit reached':allNotFound?'UPC not found in database':(attempts[0]?.error?.message||'UPC lookup failed'));
+  e.code=rateLimited?'RATE_LIMIT':allNotFound?'NOT_FOUND':'LOOKUP_FAILED';
+  e.attempts=attempts;
+  throw e;
 }
 async function resolveBarcode(code){
-  barcodeBusy=true;cameraStatus.textContent=`Barcode ${code} read. Checking physical-media database…`;
+  barcodeBusy=true;cameraStatus.textContent=`Barcode ${code} read. Looking up title…`;
   try{
     const found=await lookupBarcode(code),title=found.title||found.raw,year=found.year||null;
     titleInput.value=title;yearInput.value=year||'';closeCamera();
     const matches=rankMatches(title,year),exact=matches.find(m=>(m.norm||norm(m.title))===norm(title)&&(!year||!m.year||Number(m.year)===year));
-    const details=[found.source,found.format,found.year].filter(Boolean).join(' • ');
+    const details=[found.source,found.year].filter(Boolean).join(' • ');
     if(exact)renderExact(exact,'✓ YOU ALREADY HAVE THIS ONE',`${details}: ${found.raw}`);
     else if(matches.length)renderMatches(matches,'BARCODE — POSSIBLE MATCHES',`${details}: ${found.raw}`);
     else result.innerHTML=`<div class="answer bad"><div class="kicker">BARCODE IDENTIFIED — NOT IN LIBRARY</div><div><strong>${escapeHtml(found.raw)}${found.year?` (${escapeHtml(found.year)})`:''}</strong></div><div class="barcode-note">UPC ${escapeHtml(code)} • ${escapeHtml(details)}</div></div>`;
   }catch(e){
     closeCamera();
     const q=encodeURIComponent(code+' DVD Blu-ray movie');
-    const myUpc=`https://v2.my-upc.com/upc/${encodeURIComponent(String(code).replace(/\D/g,''))}`;
-    result.innerHTML=`<div class="answer warn"><div class="kicker">BARCODE READ — DATABASE MISS</div><div>UPC <strong>${escapeHtml(code)}</strong></div><div class="barcode-note">The barcode scanned correctly, but UPCMDB and the generic fallbacks did not identify it. You can still type a rough title above.</div><div class="fallback-links"><a class="online-link" href="${myUpc}" target="_blank" rel="noopener">Check My-UPC</a><a class="online-link" href="https://www.google.com/search?q=${q}" target="_blank" rel="noopener">Search this UPC on the web</a></div></div>`;
+    const label=e&&e.code==='RATE_LIMIT'?'BARCODE READ — LOOKUP LIMIT':e&&e.code==='NOT_FOUND'?'BARCODE READ — DATABASE MISS':'BARCODE READ — LOOKUP UNAVAILABLE';
+    const note=e&&e.code==='RATE_LIMIT'?'The free UPC lookup has hit its rate limit.':e&&e.code==='NOT_FOUND'?'UPCitemdb returned no product for this barcode.':'The barcode scanned correctly, but the lookup relay could not get a usable response.';
+    result.innerHTML=`<div class="answer warn"><div class="kicker">${escapeHtml(label)}</div><div>UPC <strong>${escapeHtml(code)}</strong></div><div class="barcode-note">${escapeHtml(note)} You can still type a rough title above.</div><div class="fallback-links"><a class="online-link" href="https://www.google.com/search?q=${q}" target="_blank" rel="noopener">Search this UPC on the web</a></div></div>`;
   }finally{barcodeBusy=false}
 }
 
