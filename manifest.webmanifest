@@ -1,0 +1,13 @@
+{
+  "name":"Colin Movie Check",
+  "short_name":"Movie Check",
+  "start_url":"./",
+  "display":"standalone",
+  "background_color":"#0d0f10",
+  "theme_color":"#111315",
+  "description":"Check whether a movie is already in the Colin/Jellyfin library.",
+  "icons":[
+    {"src":"icon-192.png","sizes":"192x192","type":"image/png"},
+    {"src":"icon-512.png","sizes":"512x512","type":"image/png"}
+  ]
+}

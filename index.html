@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#111315">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://api.upcitemdb.com; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Colin Movie Check</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon-192.png">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<main class="wrap">
+  <header class="topbar">
+    <div>
+      <div class="eyebrow">COLIN</div>
+      <h1>Movie Check</h1>
+    </div>
+    <button id="refreshBtn" class="icon-btn" type="button" aria-label="Refresh catalog">↻</button>
+  </header>
+
+  <section id="unlockPanel" class="panel hidden">
+    <h2>Unlock your library</h2>
+    <p class="muted">Your movie list is encrypted before it leaves Colin.</p>
+    <form id="unlockForm">
+      <label for="passphrase">Catalog passphrase</label>
+      <input id="passphrase" type="password" autocomplete="current-password" minlength="12" required>
+      <label class="check"><input id="rememberPass" type="checkbox" checked> Remember on this phone</label>
+      <button class="primary" type="submit">Unlock</button>
+    </form>
+    <p id="unlockError" class="error" aria-live="polite"></p>
+  </section>
+
+  <section id="appPanel" class="hidden">
+    <div class="search-card">
+      <label for="searchInput">Search your movies</label>
+      <input id="searchInput" type="search" placeholder="Start typing a title…" autocomplete="off" enterkeyhint="search">
+      <button id="scanBtn" class="primary scan" type="button">▣ Scan barcode</button>
+      <div class="hint">Manual search works offline after the catalog has loaded.</div>
+    </div>
+
+    <section id="cameraPanel" class="panel hidden" aria-live="polite">
+      <div class="camera-head">
+        <strong>Point at the UPC barcode</strong>
+        <button id="closeCameraBtn" class="ghost" type="button">Close</button>
+      </div>
+      <div class="camera-frame"><video id="cameraVideo" playsinline muted></video><div class="reticle"></div></div>
+      <p id="cameraStatus" class="muted">Starting camera…</p>
+    </section>
+
+    <section id="result" class="result" aria-live="polite">
+      <div class="empty-state">Type a title or scan a disc case.</div>
+    </section>
+
+    <footer>
+      <span id="catalogStatus">Catalog not loaded</span>
+      <button id="forgetBtn" class="text-btn" type="button">Forget key</button>
+    </footer>
+  </section>
+</main>
+<script src="app.js" defer></script>
+</body>
+</html>
