@@ -1,11 +1,11 @@
 'use strict';
-const APP_VERSION='2.6';
+const APP_VERSION='2.6.1';
 const UPC_PROXY_BASE='https://colin-movie-upc.casey-burnette.workers.dev';
 const ZXING_URL='https://unpkg.com/@zxing/browser@0.2.1/umd/zxing-browser.min.js';
 const $=s=>document.querySelector(s);
 const unlockPanel=$('#unlockPanel'),appPanel=$('#appPanel'),unlockForm=$('#unlockForm'),passInput=$('#passphrase'),rememberPass=$('#rememberPass'),unlockError=$('#unlockError');
 const titleInput=$('#titleInput'),yearInput=$('#yearInput'),result=$('#result'),catalogStatus=$('#catalogStatus'),refreshBtn=$('#refreshBtn'),forgetBtn=$('#forgetBtn');
-const scanBtn=$('#scanBtn'),cameraPanel=$('#cameraPanel'),cameraVideo=$('#cameraVideo'),cameraStatus=$('#cameraStatus'),closeCameraBtn=$('#closeCameraBtn');
+const scanBtn=$('#scanBtn'),cameraPanel=$('#cameraPanel'),cameraFrame=$('#cameraFrame'),cameraVideo=$('#cameraVideo'),cameraStatus=$('#cameraStatus'),closeCameraBtn=$('#closeCameraBtn'),focusTarget=$('#focusTarget');
 const barcodePhotoBtn=$('#barcodePhotoBtn'),barcodePhotoInput=$('#barcodePhotoInput');
 let catalog=null,passphrase='',stream=null,scanTimer=null,detector=null,zxingControls=null,barcodeBusy=false;
 const CACHE_KEY='cmc.catalog.wrapper.v26',PASS_KEY='cmc.pass.v1';
@@ -137,17 +137,64 @@ async function resolveBarcode(code){
 }
 
 async function makeNativeDetector(){if(!('BarcodeDetector' in globalThis))return null;try{const wanted=['upc_a','upc_e','ean_13','ean_8'];if(typeof BarcodeDetector.getSupportedFormats==='function'){const supported=await BarcodeDetector.getSupportedFormats(),formats=wanted.filter(f=>supported.includes(f));return formats.length?new BarcodeDetector({formats}):new BarcodeDetector()}return new BarcodeDetector()}catch(_){return null}}
-async function tuneCameraTrack(s){try{const track=s.getVideoTracks()[0];if(!track||!track.getCapabilities)return;const caps=track.getCapabilities(),advanced={};if(Array.isArray(caps.focusMode)&&caps.focusMode.includes('continuous'))advanced.focusMode='continuous';if(Object.keys(advanced).length)await track.applyConstraints({advanced:[advanced]})}catch(_){}}
+function activeCameraTrack(){const s=stream||cameraVideo.srcObject;return s&&typeof s.getVideoTracks==='function'?s.getVideoTracks()[0]:null}
+function cameraCapabilities(track){try{return track&&typeof track.getCapabilities==='function'?track.getCapabilities():{}}catch(_){return {}}}
+async function tuneCameraTrack(s){try{const track=s&&s.getVideoTracks?s.getVideoTracks()[0]:null;if(!track)return;const caps=cameraCapabilities(track),advanced={};if(Array.isArray(caps.focusMode)&&caps.focusMode.includes('continuous'))advanced.focusMode='continuous';if(Object.keys(advanced).length)await track.applyConstraints({advanced:[advanced]})}catch(_){}}
+function displayedVideoPoint(clientX,clientY){
+  const rect=cameraVideo.getBoundingClientRect();
+  if(!rect.width||!rect.height)return null;
+  let x=(clientX-rect.left)/rect.width,y=(clientY-rect.top)/rect.height;
+  x=Math.min(1,Math.max(0,x));y=Math.min(1,Math.max(0,y));
+  const vw=cameraVideo.videoWidth||0,vh=cameraVideo.videoHeight||0;
+  if(!vw||!vh)return {x,y};
+  const boxAspect=rect.width/rect.height,videoAspect=vw/vh;
+  if(videoAspect>boxAspect){const shown=boxAspect/videoAspect,offset=(1-shown)/2;x=offset+x*shown}
+  else if(videoAspect<boxAspect){const shown=videoAspect/boxAspect,offset=(1-shown)/2;y=offset+y*shown}
+  return {x:Math.min(1,Math.max(0,x)),y:Math.min(1,Math.max(0,y))};
+}
+function showFocusTarget(clientX,clientY,state='working'){
+  if(!focusTarget||!cameraFrame)return;
+  const r=cameraFrame.getBoundingClientRect();
+  focusTarget.style.left=`${clientX-r.left}px`;focusTarget.style.top=`${clientY-r.top}px`;
+  focusTarget.classList.remove('hidden','focus-ok','focus-no');
+  if(state==='ok')focusTarget.classList.add('focus-ok');
+  if(state==='no')focusTarget.classList.add('focus-no');
+  clearTimeout(showFocusTarget.timer);showFocusTarget.timer=setTimeout(()=>focusTarget.classList.add('hidden'),900);
+}
+async function focusCameraAt(clientX,clientY){
+  const track=activeCameraTrack();if(!track)return;
+  const point=displayedVideoPoint(clientX,clientY);if(!point)return;
+  showFocusTarget(clientX,clientY,'working');
+  const caps=cameraCapabilities(track),supported=navigator.mediaDevices&&navigator.mediaDevices.getSupportedConstraints?navigator.mediaDevices.getSupportedConstraints():{};
+  const canPoint=Boolean(supported.pointsOfInterest||Object.prototype.hasOwnProperty.call(caps,'pointsOfInterest'));
+  const modes=Array.isArray(caps.focusMode)?caps.focusMode:[];
+  try{
+    if(canPoint){
+      const shot={pointsOfInterest:[point]};
+      if(modes.includes('single-shot'))shot.focusMode='single-shot';else if(modes.includes('continuous'))shot.focusMode='continuous';
+      await track.applyConstraints({advanced:[shot]});
+      if(modes.includes('continuous')&&shot.focusMode==='single-shot')setTimeout(()=>track.applyConstraints({advanced:[{pointsOfInterest:[point],focusMode:'continuous'}]}).catch(()=>{}),700);
+      showFocusTarget(clientX,clientY,'ok');cameraStatus.textContent='Focused there. Hold the barcode steady.';return;
+    }
+    if(modes.includes('single-shot')){
+      await track.applyConstraints({advanced:[{focusMode:'single-shot'}]});
+      if(modes.includes('continuous'))setTimeout(()=>track.applyConstraints({advanced:[{focusMode:'continuous'}]}).catch(()=>{}),700);
+      showFocusTarget(clientX,clientY,'ok');cameraStatus.textContent='Refocused. Exact tap focus is not exposed by this browser.';return;
+    }
+    if(modes.includes('continuous')){await track.applyConstraints({advanced:[{focusMode:'continuous'}]});showFocusTarget(clientX,clientY,'ok');cameraStatus.textContent='Continuous autofocus is active; exact tap focus is not exposed by this browser.';return}
+    showFocusTarget(clientX,clientY,'no');cameraStatus.textContent='This phone/browser controls focus itself. Try moving the barcode farther away.';
+  }catch(_){showFocusTarget(clientX,clientY,'no');cameraStatus.textContent='Tap focus is not available on this camera; continuous autofocus will keep trying.'}
+}
 async function nativeScanLoop(){if(!detector||!stream||barcodeBusy)return;try{const codes=await detector.detect(cameraVideo);if(codes&&codes[0]&&codes[0].rawValue){barcodeBusy=true;await resolveBarcode(codes[0].rawValue);return}}catch(_){}scanTimer=setTimeout(nativeScanLoop,180)}
-async function startNativeBarcode(){detector=await makeNativeDetector();if(!detector)throw new Error('Native scanner unavailable');stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}},audio:false});await tuneCameraTrack(stream);cameraVideo.srcObject=stream;await cameraVideo.play();cameraStatus.textContent='Hold the barcode inside the box.';nativeScanLoop()}
-async function startZXingBarcode(){await loadScript(ZXING_URL,'ZXingBrowser');if(!window.ZXingBrowser||!ZXingBrowser.BrowserMultiFormatReader)throw new Error('Fallback scanner did not load');const reader=new ZXingBrowser.BrowserMultiFormatReader(undefined,{delayBetweenScanAttempts:180,delayBetweenScanSuccess:1200});cameraStatus.textContent='Compatibility scanner ready. Hold the barcode steady.';zxingControls=await reader.decodeFromConstraints({video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}},audio:false},cameraVideo,async scanResult=>{if(scanResult&&!barcodeBusy){barcodeBusy=true;const code=typeof scanResult.getText==='function'?scanResult.getText():String(scanResult.text||scanResult);await resolveBarcode(code)}})}
+async function startNativeBarcode(){detector=await makeNativeDetector();if(!detector)throw new Error('Native scanner unavailable');stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}},audio:false});await tuneCameraTrack(stream);cameraVideo.srcObject=stream;await cameraVideo.play();cameraStatus.textContent='Hold the barcode inside the box. Tap the barcode to focus.';nativeScanLoop()}
+async function startZXingBarcode(){await loadScript(ZXING_URL,'ZXingBrowser');if(!window.ZXingBrowser||!ZXingBrowser.BrowserMultiFormatReader)throw new Error('Fallback scanner did not load');const reader=new ZXingBrowser.BrowserMultiFormatReader(undefined,{delayBetweenScanAttempts:180,delayBetweenScanSuccess:1200});cameraStatus.textContent='Compatibility scanner ready. Hold the barcode steady. Tap it to focus.';zxingControls=await reader.decodeFromConstraints({video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}},audio:false},cameraVideo,async scanResult=>{if(scanResult&&!barcodeBusy){barcodeBusy=true;const code=typeof scanResult.getText==='function'?scanResult.getText():String(scanResult.text||scanResult);await resolveBarcode(code)}});await tuneCameraTrack(cameraVideo.srcObject)}
 async function openCamera(){closeCamera();barcodeBusy=false;cameraPanel.classList.remove('hidden');cameraStatus.textContent='Starting camera…';if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){cameraStatus.textContent='Live camera is unavailable. Use a barcode photo instead.';return}try{await startNativeBarcode();return}catch(_){closeCameraStreamsOnly();cameraPanel.classList.remove('hidden')}try{cameraStatus.textContent='Loading compatibility scanner…';await startZXingBarcode()}catch(_){cameraStatus.textContent='Live scan could not start. Tap “Take a barcode photo” below.'}}
 function closeCameraStreamsOnly(){if(scanTimer){clearTimeout(scanTimer);scanTimer=null}if(zxingControls){try{zxingControls.stop()}catch(_){}zxingControls=null}if(stream){for(const t of stream.getTracks())t.stop();stream=null}if(cameraVideo.srcObject){try{for(const t of cameraVideo.srcObject.getTracks())t.stop()}catch(_){}cameraVideo.srcObject=null}detector=null}
 function closeCamera(){closeCameraStreamsOnly();cameraPanel.classList.add('hidden')}
 async function imageFromFile(file){return new Promise((resolve,reject)=>{const url=URL.createObjectURL(file),img=new Image();img.onload=()=>resolve({img,url});img.onerror=()=>{URL.revokeObjectURL(url);reject(new Error('Could not open image'))};img.src=url})}
 async function decodeBarcodePhoto(file){result.innerHTML='<div class="answer warn"><div class="kicker">READING BARCODE PHOTO</div><div>Please wait…</div></div>';let bitmap=null;try{const native=await makeNativeDetector();if(native&&'createImageBitmap' in window){bitmap=await createImageBitmap(file);const codes=await native.detect(bitmap);if(codes&&codes[0]&&codes[0].rawValue){bitmap.close?.();await resolveBarcode(codes[0].rawValue);return}}}catch(_){if(bitmap)bitmap.close?.()}try{await loadScript(ZXING_URL,'ZXingBrowser');const reader=new ZXingBrowser.BrowserMultiFormatReader();const {img,url}=await imageFromFile(file);try{const decoded=await reader.decodeFromImageElement(img);const code=typeof decoded.getText==='function'?decoded.getText():String(decoded.text||decoded);await resolveBarcode(code);return}finally{URL.revokeObjectURL(url)}}catch(_){result.innerHTML='<div class="answer bad"><div class="kicker">BARCODE NOT FOUND</div><div>I could not read a UPC/EAN from that photo. Try again with the barcode filling most of the frame, or type the title.</div></div>'}}
 
-scanBtn.addEventListener('click',openCamera);closeCameraBtn.addEventListener('click',closeCamera);barcodePhotoBtn.addEventListener('click',()=>barcodePhotoInput.click());
+scanBtn.addEventListener('click',openCamera);closeCameraBtn.addEventListener('click',closeCamera);barcodePhotoBtn.addEventListener('click',()=>barcodePhotoInput.click());cameraFrame.addEventListener('click',e=>{if(!barcodeBusy&&!cameraPanel.classList.contains('hidden'))focusCameraAt(e.clientX,e.clientY)});
 barcodePhotoInput.addEventListener('change',async()=>{const f=barcodePhotoInput.files&&barcodePhotoInput.files[0];barcodePhotoInput.value='';if(f){closeCamera();await decodeBarcodePhoto(f)}});
 document.addEventListener('visibilitychange',()=>{if(document.hidden)closeCamera()});window.addEventListener('pagehide',closeCamera);
 
