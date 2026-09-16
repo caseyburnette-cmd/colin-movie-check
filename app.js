@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION='2.4.0';
+const APP_VERSION='2.4.1';
 const ZXING_URL='https://unpkg.com/@zxing/browser@0.2.1/umd/zxing-browser.min.js';
 const $=s=>document.querySelector(s);
 const unlockPanel=$('#unlockPanel'),appPanel=$('#appPanel'),unlockForm=$('#unlockForm'),passInput=$('#passphrase'),rememberPass=$('#rememberPass'),unlockError=$('#unlockError');
@@ -7,7 +7,7 @@ const titleInput=$('#titleInput'),yearInput=$('#yearInput'),result=$('#result'),
 const scanBtn=$('#scanBtn'),cameraPanel=$('#cameraPanel'),cameraVideo=$('#cameraVideo'),cameraStatus=$('#cameraStatus'),closeCameraBtn=$('#closeCameraBtn');
 const barcodePhotoBtn=$('#barcodePhotoBtn'),barcodePhotoInput=$('#barcodePhotoInput');
 let catalog=null,passphrase='',stream=null,scanTimer=null,detector=null,zxingControls=null,barcodeBusy=false;
-const CACHE_KEY='cmc.catalog.wrapper.v2',PASS_KEY='cmc.pass.v1';
+const CACHE_KEY='cmc.catalog.wrapper.v241',PASS_KEY='cmc.pass.v1';
 
 function norm(s){return (s||'').normalize('NFKD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/&/g,' and ').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim()}
 function escapeHtml(s){return String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
@@ -45,12 +45,13 @@ async function fetchAndUnlock(phrase){
   throw networkErr||new Error('No cached encrypted catalog is available');
 }
 
+function showUnlock(message=''){appPanel.classList.add('hidden');unlockPanel.classList.remove('hidden');if(message)unlockError.textContent=message;passInput.focus()}
 function showApp(){unlockPanel.classList.add('hidden');appPanel.classList.remove('hidden');updateStatus();titleInput.focus()}
 function updateStatus(){if(!catalog)return;const d=new Date(catalog.library_changed_at);catalogStatus.textContent=`${catalog.count} movies • ${Number.isNaN(d.getTime())?'cached catalog':`updated ${d.toLocaleString()}`}`}
-async function unlock(phrase,remember){unlockError.textContent='';try{catalog=await fetchAndUnlock(phrase);passphrase=phrase;if(remember)localStorage.setItem(PASS_KEY,phrase);else localStorage.removeItem(PASS_KEY);showApp();runSearch()}catch(e){unlockError.textContent=e.message||'Could not unlock catalog'}}
+async function unlock(phrase,remember){unlockError.textContent='';try{catalog=await fetchAndUnlock(phrase);passphrase=phrase;if(remember)localStorage.setItem(PASS_KEY,phrase);else localStorage.removeItem(PASS_KEY);showApp();runSearch();return true}catch(e){showUnlock(e.message||'Could not unlock catalog');return false}}
 unlockForm.addEventListener('submit',e=>{e.preventDefault();unlock(passInput.value,rememberPass.checked)});
 refreshBtn.addEventListener('click',async()=>{if(!passphrase)return;refreshBtn.disabled=true;try{catalog=await fetchAndUnlock(passphrase);updateStatus();runSearch()}catch(e){alert('Refresh failed: '+e.message)}finally{refreshBtn.disabled=false}});
-forgetBtn.addEventListener('click',()=>{localStorage.removeItem(PASS_KEY);passphrase='';catalog=null;appPanel.classList.add('hidden');unlockPanel.classList.remove('hidden');passInput.value='';passInput.focus()});
+forgetBtn.addEventListener('click',()=>{localStorage.removeItem(PASS_KEY);localStorage.removeItem(CACHE_KEY);passphrase='';catalog=null;passInput.value='';unlockError.textContent='';showUnlock()});
 
 const STOP=new Set(['the','a','an','of','and','or','to','in','on','for','with','from','by','part']);
 function tokens(s){return norm(s).split(' ').filter(Boolean)}
@@ -143,6 +144,8 @@ document.addEventListener('visibilitychange',()=>{if(document.hidden)closeCamera
 
 (async function init(){
   if('serviceWorker' in navigator){try{const reg=await navigator.serviceWorker.register('sw.js');reg.update().catch(()=>{})}catch(_){}}
-  const saved=localStorage.getItem(PASS_KEY);if(saved){passInput.value=saved;await unlock(saved,true)}else{unlockPanel.classList.remove('hidden');passInput.focus()}
+  showUnlock();
+  const saved=localStorage.getItem(PASS_KEY);
+  if(saved){passInput.value=saved;unlockError.textContent='Checking saved key…';await unlock(saved,true)}
   console.info('Colin Movie Check',APP_VERSION);
 })();

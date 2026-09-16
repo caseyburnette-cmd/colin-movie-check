@@ -11,7 +11,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon-192.png">
   <link rel="apple-touch-icon" href="icon-192.png">
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=241">
 </head>
 <body>
 <main class="wrap">
@@ -20,7 +20,7 @@
     <button id="refreshBtn" class="icon-btn" type="button" aria-label="Refresh catalog">↻</button>
   </header>
 
-  <section id="unlockPanel" class="panel hidden">
+  <section id="unlockPanel" class="panel">
     <h2>Unlock your library</h2>
     <p class="muted">Your movie list is encrypted before it leaves Colin.</p>
     <form id="unlockForm">
@@ -63,10 +63,10 @@
 
     <footer>
       <span id="catalogStatus">Catalog not loaded</span>
-      <span class="footer-actions"><span class="version">v2.4</span><button id="forgetBtn" class="text-btn" type="button">Forget key</button></span>
+      <span class="footer-actions"><span class="version">v2.4.1</span><button id="forgetBtn" class="text-btn" type="button">Forget key</button></span>
     </footer>
   </section>
 </main>
-<script src="app.js" defer></script>
+<script src="app.js?v=241" defer></script>
 </body>
 </html>
