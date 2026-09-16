@@ -1,14 +1,14 @@
 'use strict';
-const APP_VERSION='2.6.1';
+const APP_VERSION='2.6.2';
 const UPC_PROXY_BASE='https://colin-movie-upc.casey-burnette.workers.dev';
 const ZXING_URL='https://unpkg.com/@zxing/browser@0.2.1/umd/zxing-browser.min.js';
 const $=s=>document.querySelector(s);
 const unlockPanel=$('#unlockPanel'),appPanel=$('#appPanel'),unlockForm=$('#unlockForm'),passInput=$('#passphrase'),rememberPass=$('#rememberPass'),unlockError=$('#unlockError');
 const titleInput=$('#titleInput'),yearInput=$('#yearInput'),result=$('#result'),catalogStatus=$('#catalogStatus'),refreshBtn=$('#refreshBtn'),forgetBtn=$('#forgetBtn');
-const scanBtn=$('#scanBtn'),cameraPanel=$('#cameraPanel'),cameraFrame=$('#cameraFrame'),cameraVideo=$('#cameraVideo'),cameraStatus=$('#cameraStatus'),closeCameraBtn=$('#closeCameraBtn'),focusTarget=$('#focusTarget');
+const scanBtn=$('#scanBtn'),cameraPanel=$('#cameraPanel'),cameraFrame=$('#cameraFrame'),cameraVideo=$('#cameraVideo'),cameraStatus=$('#cameraStatus'),closeCameraBtn=$('#closeCameraBtn'),focusTarget=$('#focusTarget'),cameraChoiceRow=$('#cameraChoiceRow'),cameraSelect=$('#cameraSelect');
 const barcodePhotoBtn=$('#barcodePhotoBtn'),barcodePhotoInput=$('#barcodePhotoInput');
 let catalog=null,passphrase='',stream=null,scanTimer=null,detector=null,zxingControls=null,barcodeBusy=false;
-const CACHE_KEY='cmc.catalog.wrapper.v26',PASS_KEY='cmc.pass.v1';
+const CACHE_KEY='cmc.catalog.wrapper.v26',PASS_KEY='cmc.pass.v1',CAMERA_KEY='cmc.camera.device.v1';
 
 function norm(s){return (s||'').normalize('NFKD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/&/g,' and ').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim()}
 function escapeHtml(s){return String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
@@ -85,6 +85,11 @@ function loadScript(src,globalName){return new Promise((resolve,reject)=>{if(glo
 function productYear(s){const m=String(s||'').match(/\b((?:18|19|20)\d{2})\b/);return m?Number(m[1]):null}
 function cleanProductTitle(s){
   let x=String(s||'');
+  const categoryCut=x.indexOf('>');
+  if(categoryCut>=0){
+    x=x.slice(0,categoryCut);
+    x=x.replace(/\b(?:dvd|blu[ -]?ray|4k|uhd|ultra hd|disc)\b.*$/i,' ');
+  }
   x=x.replace(/\([^)]*(?:dvd|blu[ -]?ray|4k|uhd|ultra hd|disc|edition|steelbook|widescreen|fullscreen|digital|combo|standard)[^)]*\)/ig,' ');
   x=x.replace(/\[[^\]]*(?:dvd|blu[ -]?ray|4k|uhd|disc|edition|steelbook|widescreen|fullscreen|digital|combo|standard)[^\]]*\]/ig,' ');
   x=x.replace(/\b(4k|uhd|ultra hd|blu[ -]?ray|dvd|digital|video disc|disc|widescreen|fullscreen|special edition|collector'?s edition|steelbook|combo pack|2[- ]disc|3[- ]disc|anniversary edition|standard edition|standard)\b/ig,' ');
@@ -92,6 +97,38 @@ function cleanProductTitle(s){
   x=x.replace(/[\[\]{}()]/g,' ');
   x=x.replace(/\s+/g,' ').trim();
   return x;
+}
+
+const BARCODE_STOP=new Set([...STOP,'movie','movies','film','films','video','home','entertainment','english','spanish','french','german','adventure','action','comedy','drama','family']);
+function barcodeTokens(s){return tokens(s).filter(t=>!BARCODE_STOP.has(t)&&t.length>1)}
+function sequelMarkers(s){
+  const ts=tokens(s),out=new Set();
+  for(let i=0;i<ts.length;i++){
+    const t=ts[i];
+    if(['chapter','part','episode','volume','vol','season'].includes(t)){out.add(t);if(ts[i+1])out.add(ts[i+1]);continue}
+    if(/^(?:ii|iii|iv|v|vi|vii|viii|ix|x)$/.test(t))out.add(t);
+    if(/^\d+$/.test(t)){const n=Number(t);if(n>=2&&n<=10)out.add(t)}
+  }
+  return out;
+}
+function markerMismatch(a,b){if(a.size!==b.size)return true;for(const x of a)if(!b.has(x))return true;return false}
+function phraseContains(longer,shorter){const a=` ${norm(longer)} `,b=` ${norm(shorter)} `;return b.trim().length>1&&a.includes(b)}
+function rankBarcodeMatches(q,year=null){
+  const nq=norm(q);if(!nq||!catalog)return[];
+  const qt=[...new Set(barcodeTokens(nq))],qset=new Set(qt),qmarkers=sequelMarkers(nq);
+  return catalog.movies.map(m=>{
+    const nt=norm(m.title),mt=[...new Set(barcodeTokens(nt))],mset=new Set(mt),mmarkers=sequelMarkers(nt);
+    const common=mt.filter(t=>qset.has(t)).length;
+    const qCoverage=qt.length?common/qt.length:0,mCoverage=mt.length?common/mt.length:0;
+    const sequelConflict=markerMismatch(qmarkers,mmarkers);
+    const yearConflict=Boolean(year&&m.year&&Math.abs(Number(m.year)-Number(year))>1);
+    let kind='',score=0;
+    if(!sequelConflict&&!yearConflict&&nt===nq){kind='exact';score=100}
+    else if(!sequelConflict&&!yearConflict&&mt.length>=2&&common===mt.length&&phraseContains(nq,nt)&&mCoverage===1&&qCoverage>=0.5){kind='exact';score=96}
+    else if(!sequelConflict&&!yearConflict&&common>=2&&mCoverage>=0.75&&qCoverage>=0.55){kind='possible';score=Math.round(60+20*mCoverage+15*qCoverage)}
+    if(year&&m.year&&Number(m.year)===Number(year))score+=5;
+    return {...m,barcodeKind:kind,barcodeScore:score,barcodeCommon:common};
+  }).filter(m=>m.barcodeKind).sort((a,b)=>b.barcodeScore-a.barcodeScore||a.title.localeCompare(b.title)).slice(0,5)
 }
 function barcodeVariants(code){const d=String(code||'').replace(/\D/g,'');const out=[d];if(d.length===12)out.push('0'+d);if(d.length===13&&d.startsWith('0'))out.push(d.slice(1));if(d.length===14&&d.startsWith('00'))out.push(d.slice(2));return [...new Set(out.filter(Boolean))]}
 async function fetchJsonWithTimeout(url,ms=7000){const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),ms);try{const r=await fetch(url,{headers:{Accept:'application/json'},signal:ctrl.signal,cache:'no-store'});let j=null;try{j=await r.json()}catch(_){}if(!r.ok){const err=new Error((j&&j.error)||('HTTP '+r.status));err.status=r.status;err.payload=j;throw err}return j}finally{clearTimeout(timer)}}
@@ -122,11 +159,11 @@ async function resolveBarcode(code){
   try{
     const found=await lookupBarcode(code),title=found.title||found.raw,year=found.year||null;
     titleInput.value=title;yearInput.value=year||'';closeCamera();
-    const matches=rankMatches(title,year),exact=matches.find(m=>(m.norm||norm(m.title))===norm(title)&&(!year||!m.year||Number(m.year)===year));
+    const matches=rankBarcodeMatches(title,year),exact=matches.find(m=>m.barcodeKind==='exact'),possible=matches.filter(m=>m.barcodeKind==='possible');
     const details=[found.source,found.year].filter(Boolean).join(' • ');
-    if(exact)renderExact(exact,'✓ YOU ALREADY HAVE THIS ONE',`${details}: ${found.raw}`);
-    else if(matches.length)renderMatches(matches,'BARCODE — POSSIBLE MATCHES',`${details}: ${found.raw}`);
-    else result.innerHTML=`<div class="answer bad"><div class="kicker">BARCODE IDENTIFIED — NOT IN LIBRARY</div><div><strong>${escapeHtml(found.raw)}${found.year?` (${escapeHtml(found.year)})`:''}</strong></div><div class="barcode-note">UPC ${escapeHtml(code)} • ${escapeHtml(details)}</div></div>`;
+    if(exact)renderExact(exact,'✓ YOU ALREADY HAVE THIS ONE',details);
+    else if(possible.length)renderMatches(possible,'BARCODE — POSSIBLE MATCHES',`${details}: ${title}`);
+    else result.innerHTML=`<div class="answer bad"><div class="kicker">BARCODE IDENTIFIED — NOT IN LIBRARY</div><div><strong>${escapeHtml(title)}${found.year?` (${escapeHtml(found.year)})`:''}</strong></div><div class="barcode-note">UPC ${escapeHtml(code)} • ${escapeHtml(details)}</div></div>`;
   }catch(e){
     closeCamera();
     const q=encodeURIComponent(code+' DVD Blu-ray movie');
@@ -185,16 +222,47 @@ async function focusCameraAt(clientX,clientY){
     showFocusTarget(clientX,clientY,'no');cameraStatus.textContent='This phone/browser controls focus itself. Try moving the barcode farther away.';
   }catch(_){showFocusTarget(clientX,clientY,'no');cameraStatus.textContent='Tap focus is not available on this camera; continuous autofocus will keep trying.'}
 }
+function selectedCameraId(){return localStorage.getItem(CAMERA_KEY)||''}
+function cameraVideoConstraints(deviceId=selectedCameraId()){
+  const video={width:{ideal:1920},height:{ideal:1080}};
+  if(deviceId)video.deviceId={exact:deviceId};else video.facingMode={ideal:'environment'};
+  return {video,audio:false};
+}
+function friendlyCameraLabel(d,i){const label=(d.label||'').trim();return label||`Camera ${i+1}`}
+async function populateCameraChoices(){
+  if(!cameraSelect||!cameraChoiceRow||!navigator.mediaDevices?.enumerateDevices)return;
+  try{
+    const devices=(await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==='videoinput');
+    const current=activeCameraTrack()?.getSettings?.().deviceId||'';
+    cameraSelect.innerHTML='';
+    devices.forEach((d,i)=>{const o=document.createElement('option');o.value=d.deviceId;o.textContent=friendlyCameraLabel(d,i);cameraSelect.appendChild(o)});
+    if(current&&devices.some(d=>d.deviceId===current))cameraSelect.value=current;
+    cameraChoiceRow.classList.toggle('hidden',devices.length<2);
+  }catch(_){cameraChoiceRow.classList.add('hidden')}
+}
 async function nativeScanLoop(){if(!detector||!stream||barcodeBusy)return;try{const codes=await detector.detect(cameraVideo);if(codes&&codes[0]&&codes[0].rawValue){barcodeBusy=true;await resolveBarcode(codes[0].rawValue);return}}catch(_){}scanTimer=setTimeout(nativeScanLoop,180)}
-async function startNativeBarcode(){detector=await makeNativeDetector();if(!detector)throw new Error('Native scanner unavailable');stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}},audio:false});await tuneCameraTrack(stream);cameraVideo.srcObject=stream;await cameraVideo.play();cameraStatus.textContent='Hold the barcode inside the box. Tap the barcode to focus.';nativeScanLoop()}
-async function startZXingBarcode(){await loadScript(ZXING_URL,'ZXingBrowser');if(!window.ZXingBrowser||!ZXingBrowser.BrowserMultiFormatReader)throw new Error('Fallback scanner did not load');const reader=new ZXingBrowser.BrowserMultiFormatReader(undefined,{delayBetweenScanAttempts:180,delayBetweenScanSuccess:1200});cameraStatus.textContent='Compatibility scanner ready. Hold the barcode steady. Tap it to focus.';zxingControls=await reader.decodeFromConstraints({video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}},audio:false},cameraVideo,async scanResult=>{if(scanResult&&!barcodeBusy){barcodeBusy=true;const code=typeof scanResult.getText==='function'?scanResult.getText():String(scanResult.text||scanResult);await resolveBarcode(code)}});await tuneCameraTrack(cameraVideo.srcObject)}
-async function openCamera(){closeCamera();barcodeBusy=false;cameraPanel.classList.remove('hidden');cameraStatus.textContent='Starting camera…';if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){cameraStatus.textContent='Live camera is unavailable. Use a barcode photo instead.';return}try{await startNativeBarcode();return}catch(_){closeCameraStreamsOnly();cameraPanel.classList.remove('hidden')}try{cameraStatus.textContent='Loading compatibility scanner…';await startZXingBarcode()}catch(_){cameraStatus.textContent='Live scan could not start. Tap “Take a barcode photo” below.'}}
+async function getCameraStream(){
+  const saved=selectedCameraId();
+  try{return await navigator.mediaDevices.getUserMedia(cameraVideoConstraints(saved))}
+  catch(e){if(saved){localStorage.removeItem(CAMERA_KEY);return await navigator.mediaDevices.getUserMedia(cameraVideoConstraints(''))}throw e}
+}
+async function startNativeBarcode(){detector=await makeNativeDetector();if(!detector)throw new Error('Native scanner unavailable');stream=await getCameraStream();await tuneCameraTrack(stream);cameraVideo.srcObject=stream;await cameraVideo.play();await populateCameraChoices();cameraStatus.textContent='Hold the barcode inside the box. Tap the barcode to focus.';nativeScanLoop()}
+async function startZXingBarcode(){await loadScript(ZXING_URL,'ZXingBrowser');if(!window.ZXingBrowser||!ZXingBrowser.BrowserMultiFormatReader)throw new Error('Fallback scanner did not load');const reader=new ZXingBrowser.BrowserMultiFormatReader(undefined,{delayBetweenScanAttempts:180,delayBetweenScanSuccess:1200});cameraStatus.textContent='Compatibility scanner ready. Hold the barcode steady. Tap it to focus.';zxingControls=await reader.decodeFromConstraints(cameraVideoConstraints(),cameraVideo,async scanResult=>{if(scanResult&&!barcodeBusy){barcodeBusy=true;const code=typeof scanResult.getText==='function'?scanResult.getText():String(scanResult.text||scanResult);await resolveBarcode(code)}});stream=cameraVideo.srcObject;await tuneCameraTrack(stream);await populateCameraChoices()}
+async function startBarcodeCamera(){
+  try{await startNativeBarcode();return}catch(_){closeCameraStreamsOnly();cameraPanel.classList.remove('hidden')}
+  try{cameraStatus.textContent='Loading compatibility scanner…';await startZXingBarcode()}catch(_){cameraStatus.textContent='Live scan could not start. Tap “Take a barcode photo” below.'}
+}
+async function switchCamera(deviceId){
+  if(!deviceId)return;
+  localStorage.setItem(CAMERA_KEY,deviceId);barcodeBusy=false;cameraStatus.textContent='Switching camera…';closeCameraStreamsOnly();cameraPanel.classList.remove('hidden');await startBarcodeCamera();
+}
+async function openCamera(){closeCamera();barcodeBusy=false;cameraPanel.classList.remove('hidden');cameraStatus.textContent='Starting camera…';if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){cameraStatus.textContent='Live camera is unavailable. Use a barcode photo instead.';return}await startBarcodeCamera()}
 function closeCameraStreamsOnly(){if(scanTimer){clearTimeout(scanTimer);scanTimer=null}if(zxingControls){try{zxingControls.stop()}catch(_){}zxingControls=null}if(stream){for(const t of stream.getTracks())t.stop();stream=null}if(cameraVideo.srcObject){try{for(const t of cameraVideo.srcObject.getTracks())t.stop()}catch(_){}cameraVideo.srcObject=null}detector=null}
 function closeCamera(){closeCameraStreamsOnly();cameraPanel.classList.add('hidden')}
 async function imageFromFile(file){return new Promise((resolve,reject)=>{const url=URL.createObjectURL(file),img=new Image();img.onload=()=>resolve({img,url});img.onerror=()=>{URL.revokeObjectURL(url);reject(new Error('Could not open image'))};img.src=url})}
 async function decodeBarcodePhoto(file){result.innerHTML='<div class="answer warn"><div class="kicker">READING BARCODE PHOTO</div><div>Please wait…</div></div>';let bitmap=null;try{const native=await makeNativeDetector();if(native&&'createImageBitmap' in window){bitmap=await createImageBitmap(file);const codes=await native.detect(bitmap);if(codes&&codes[0]&&codes[0].rawValue){bitmap.close?.();await resolveBarcode(codes[0].rawValue);return}}}catch(_){if(bitmap)bitmap.close?.()}try{await loadScript(ZXING_URL,'ZXingBrowser');const reader=new ZXingBrowser.BrowserMultiFormatReader();const {img,url}=await imageFromFile(file);try{const decoded=await reader.decodeFromImageElement(img);const code=typeof decoded.getText==='function'?decoded.getText():String(decoded.text||decoded);await resolveBarcode(code);return}finally{URL.revokeObjectURL(url)}}catch(_){result.innerHTML='<div class="answer bad"><div class="kicker">BARCODE NOT FOUND</div><div>I could not read a UPC/EAN from that photo. Try again with the barcode filling most of the frame, or type the title.</div></div>'}}
 
-scanBtn.addEventListener('click',openCamera);closeCameraBtn.addEventListener('click',closeCamera);barcodePhotoBtn.addEventListener('click',()=>barcodePhotoInput.click());cameraFrame.addEventListener('click',e=>{if(!barcodeBusy&&!cameraPanel.classList.contains('hidden'))focusCameraAt(e.clientX,e.clientY)});
+scanBtn.addEventListener('click',openCamera);closeCameraBtn.addEventListener('click',closeCamera);barcodePhotoBtn.addEventListener('click',()=>barcodePhotoInput.click());cameraFrame.addEventListener('click',e=>{if(!barcodeBusy&&!cameraPanel.classList.contains('hidden'))focusCameraAt(e.clientX,e.clientY)});cameraSelect.addEventListener('change',()=>switchCamera(cameraSelect.value));
 barcodePhotoInput.addEventListener('change',async()=>{const f=barcodePhotoInput.files&&barcodePhotoInput.files[0];barcodePhotoInput.value='';if(f){closeCamera();await decodeBarcodePhoto(f)}});
 document.addEventListener('visibilitychange',()=>{if(document.hidden)closeCamera()});window.addEventListener('pagehide',closeCamera);
 
